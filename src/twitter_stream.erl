@@ -34,17 +34,18 @@
 %% or implied, of Jebu Ittiachen.
 %%
 %% API
--export([fetch/1, fetch/3, process_data/1]).
+-export([fetch/2, fetch/4]).
 
 %% single arg version expects url of the form http://user:password@stream.twitter.com/1/statuses/sample.json
 %% this will spawn the 3 arg version so the shell is free
-fetch(URL) ->
-    spawn(twitter_stream, fetch, [URL, ?TRIES, 1]).
+fetch(URL, Callback) ->
+    spawn(twitter_stream, fetch, [URL, Callback, ?TRIES, 1]).
 
 %% 3 arg version expects url of the form http://user:password@stream.twitter.com/1/statuses/sample.json
 %% retry - number of times the stream is reconnected
 %% sleep - secs to sleep between retries.
-fetch(URL, Retry, Sleep) when Retry > 0 ->
+fetch(URL, Callback, Retry, Sleep) when Retry > 0 ->
+    error_logger:info_msg("Fetching: ~p~n", [URL]),
     %% setup the request to process async and have it stream the data
     %% back to this process
     try http:request(get,
@@ -53,46 +54,42 @@ fetch(URL, Retry, Sleep) when Retry > 0 ->
 		     [{sync, false},
 		      {stream, self}]) of
 	{ok, RequestId} ->
-	    case receive_chunk(RequestId) of
+	    case receive_chunk(RequestId, Callback) of
 		{ok, _} ->
 		    %% stream broke normally retry
 		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Retry - 1, Sleep * ?BACKOFF);
+		    fetch(URL, Callback, Retry - 1, Sleep * ?BACKOFF);
 		{error, unauthorized, Result} ->
 		    error_logger:info_msg("Request not authorized: ~p~n", [Result]),
 		    {error, Result, unauthorized};
 		{error, timeout} ->
 		    error_logger:info_msg("Request timed out~n"),
 		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Retry - 1, Sleep * ?BACKOFF);
+		    fetch(URL, Callback, Retry - 1, Sleep * ?BACKOFF);
 		{_, Reason} ->
 		    error_logger:info_msg("Got some Reason ~p ~n", [Reason]),
 		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Retry - 1, Sleep * ?BACKOFF)
+		    fetch(URL, Callback, Retry - 1, Sleep * ?BACKOFF)
 	    end;
 	Notok ->
 	    error_logger:info_msg("Request not ok: ~p~n", [Notok]),
 	    timer:sleep(Sleep * 1000),
-	    fetch(URL, Retry - 1, Sleep * ?BACKOFF)
+	    fetch(URL, Callback, Retry - 1, Sleep * ?BACKOFF)
     catch
 	Type:Reason ->
 	    error_logger:debug_msg("Caught: ~p ~p~n", [Type, Reason]),
 	    timer:sleep(Sleep * 1000),
-	    fetch(URL, Retry - 1, Sleep * ?BACKOFF)
+	    fetch(URL, Callback, Retry - 1, Sleep * ?BACKOFF)
     end;
 						%
-fetch(_, Retry, _) when Retry =< 0 ->
+fetch(_, _, Retry, _) when Retry =< 0 ->
     error_logger:info_msg("No more retries done with processing fetch thread~n"),
     {error, no_more_retry}.
-
-process_data(Data) ->
-    error_logger:info_msg("Received tweet ~p ~n", [Data]),
-    ok.
 
 %%====================================================================
 %% Internal functions
 %%====================================================================
-receive_chunk(RequestId) ->
+receive_chunk(RequestId, Callback) ->
     receive
 	{http, {RequestId, {error, Reason}}} when(Reason =:= etimedout) orelse(Reason =:= timeout) ->
 	    {error, timeout};
@@ -104,14 +101,15 @@ receive_chunk(RequestId) ->
 	%% start of streaming data
 	{http,{RequestId, stream_start, Headers}} ->
 	    error_logger:info_msg("Streaming data start ~p ~n",[Headers]),
-	    receive_chunk(RequestId);
+	    receive_chunk(RequestId, Callback);
 
 	%% streaming chunk of data
 	%% this is where we will be looping around,
 	%% we spawn this off to a seperate process as soon as we get the chunk and go back to receiving the tweets
 	{http,{RequestId, stream, Data}} ->
-	    spawn(twitter_stream, process_data, [Data]),
-	    receive_chunk(RequestId);
+	    {M, F, A} = Callback,
+	    spawn(M, F, [A ++ [Data]]),
+	    receive_chunk(RequestId, Callback);
 
 	%% end of streaming data
 	{http,{RequestId, stream_end, Headers}} ->
