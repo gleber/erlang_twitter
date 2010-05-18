@@ -2,6 +2,9 @@
 
 -author('jebu@jebu.net').
 
+-define(BACKOFF, 2).
+-define(TRIES, 2).
+
 %%
 %% Copyright (c) 2009, Jebu Ittiachen
 %% All rights reserved.
@@ -36,14 +39,14 @@
 %% single arg version expects url of the form http://user:password@stream.twitter.com/1/statuses/sample.json
 %% this will spawn the 3 arg version so the shell is free
 fetch(URL) ->
-    spawn(twitter_stream, fetch, [URL, 5, 30]).
+    spawn(twitter_stream, fetch, [URL, ?TRIES, 1]).
 
 %% 3 arg version expects url of the form http://user:password@stream.twitter.com/1/statuses/sample.json
 %% retry - number of times the stream is reconnected
 %% sleep - secs to sleep between retries.
 fetch(URL, Retry, Sleep) when Retry > 0 ->
-    %% setup the request to process async
-    %%` and have it stream the data back to this process
+    %% setup the request to process async and have it stream the data
+    %% back to this process
     try http:request(get,
 		     {URL, []},
 		     [],
@@ -52,34 +55,36 @@ fetch(URL, Retry, Sleep) when Retry > 0 ->
 	{ok, RequestId} ->
 	    case receive_chunk(RequestId) of
 		{ok, _} ->
-						% stream broke normally retry
+		    %% stream broke normally retry
 		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Retry - 1, Sleep);
+		    fetch(URL, Retry - 1, Sleep * ?BACKOFF);
 		{error, unauthorized, Result} ->
+		    error_logger:info_msg("Request not authorized: ~p~n", [Result]),
 		    {error, Result, unauthorized};
 		{error, timeout} ->
+		    error_logger:info_msg("Request timed out~n"),
 		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Retry - 1, Sleep);
+		    fetch(URL, Retry - 1, Sleep * ?BACKOFF);
 		{_, Reason} ->
 		    error_logger:info_msg("Got some Reason ~p ~n", [Reason]),
 		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Retry - 1, Sleep)
+		    fetch(URL, Retry - 1, Sleep * ?BACKOFF)
 	    end;
-	_ ->
+	Notok ->
+	    error_logger:info_msg("Request not ok: ~p~n", [Notok]),
 	    timer:sleep(Sleep * 1000),
-	    fetch(URL, Retry - 1, Sleep)
+	    fetch(URL, Retry - 1, Sleep * ?BACKOFF)
     catch
-	_:_ ->
+	Type:Reason ->
+	    error_logger:debug_msg("Caught: ~p ~p~n", [Type, Reason]),
 	    timer:sleep(Sleep * 1000),
-	    fetch(URL, Retry - 1, Sleep)
+	    fetch(URL, Retry - 1, Sleep * ?BACKOFF)
     end;
 						%
 fetch(_, Retry, _) when Retry =< 0 ->
     error_logger:info_msg("No more retries done with processing fetch thread~n"),
     {error, no_more_retry}.
-						%
-						% this is the tweet handler persumably you could do something useful here
-						%
+
 process_data(Data) ->
     error_logger:info_msg("Received tweet ~p ~n", [Data]),
     ok.
