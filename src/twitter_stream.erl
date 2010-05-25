@@ -3,7 +3,6 @@
 -author('jebu@jebu.net').
 
 -define(BACKOFF, 2).
--define(TRIES, 2).
 
 %%
 %% Copyright (c) 2009, Jebu Ittiachen
@@ -34,17 +33,17 @@
 %% or implied, of Jebu Ittiachen.
 %%
 %% API
--export([fetch/2, fetch/4]).
+-export([fetch/2, fetch/3]).
 
 %% single arg version expects url of the form http://user:password@stream.twitter.com/1/statuses/sample.json
 %% this will spawn the 3 arg version so the shell is free
 fetch(URL, Callback) ->
-    spawn(twitter_stream, fetch, [URL, Callback, ?TRIES, 1]).
+    spawn_link(twitter_stream, fetch, [URL, Callback, 1]).
 
 %% 3 arg version expects url of the form http://user:password@stream.twitter.com/1/statuses/sample.json
 %% retry - number of times the stream is reconnected
 %% sleep - secs to sleep between retries.
-fetch(URL, Callback, Retry, Sleep) when Retry > 0 ->
+fetch(URL, Callback, Sleep) ->
     error_logger:info_msg("Fetching: ~p~n", [URL]),
     %% setup the request to process async and have it stream the data
     %% back to this process
@@ -58,33 +57,29 @@ fetch(URL, Callback, Retry, Sleep) when Retry > 0 ->
 		{ok, _} ->
 		    %% stream broke normally retry
 		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Callback, Retry - 1, Sleep * ?BACKOFF);
+		    fetch(URL, Callback, Sleep * ?BACKOFF);
 		{error, unauthorized, Result} ->
 		    error_logger:info_msg("Request not authorized: ~p~n", [Result]),
 		    {error, Result, unauthorized};
 		{error, timeout} ->
 		    error_logger:info_msg("Request timed out~n"),
 		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Callback, Retry - 1, Sleep * ?BACKOFF);
+		    fetch(URL, Callback, Sleep * ?BACKOFF);
 		{_, Reason} ->
-		    error_logger:info_msg("Got some Reason ~p ~n", [Reason]),
+		    error_logger:info_msg("Request problem: ~p ~n", [Reason]),
 		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Callback, Retry - 1, Sleep * ?BACKOFF)
+		    fetch(URL, Callback, Sleep * ?BACKOFF)
 	    end;
 	Notok ->
 	    error_logger:info_msg("Request not ok: ~p~n", [Notok]),
 	    timer:sleep(Sleep * 1000),
-	    fetch(URL, Callback, Retry - 1, Sleep * ?BACKOFF)
+	    fetch(URL, Callback, Sleep * ?BACKOFF)
     catch
 	Type:Reason ->
 	    error_logger:debug_msg("Caught: ~p ~p~n", [Type, Reason]),
 	    timer:sleep(Sleep * 1000),
-	    fetch(URL, Callback, Retry - 1, Sleep * ?BACKOFF)
-    end;
-						%
-fetch(_, _, Retry, _) when Retry =< 0 ->
-    error_logger:info_msg("No more retries done with processing fetch thread~n"),
-    {error, no_more_retry}.
+	    fetch(URL, Callback, Sleep * ?BACKOFF)
+    end.
 
 %%====================================================================
 %% Internal functions
