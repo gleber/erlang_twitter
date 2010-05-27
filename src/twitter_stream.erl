@@ -4,6 +4,8 @@
 
 -define(BACKOFF, 2).
 
+-include("twitter_client.hrl").
+
 %%
 %% Copyright (c) 2009, Jebu Ittiachen
 %% All rights reserved.
@@ -56,6 +58,7 @@ fetch(URL, Callback, Sleep) ->
 	    case receive_chunk(RequestId, Callback) of
 		{ok, _} ->
 		    %% stream broke normally retry
+		    error_logger:info_msg("Stream broke normally, retry ~n"),
 		    timer:sleep(Sleep * 1000),
 		    fetch(URL, Callback, Sleep * ?BACKOFF);
 		{error, unauthorized, Result} ->
@@ -84,6 +87,54 @@ fetch(URL, Callback, Sleep) ->
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+
+%% These reflect the format that a mochijson2 parsed message comes in
+%% as.
+fill_user_rec({struct, User}) ->
+    UserRec = #user{
+      id = element(2, lists:keyfind(<<"id">>, 1, User)),
+      name = element(2, lists:keyfind(<<"name">>, 1, User)),
+      screen_name = element(2, lists:keyfind(<<"screen_name">>, 1, User)),
+      location = element(2, lists:keyfind(<<"location">>, 1, User)),
+      description = element(2, lists:keyfind(<<"description">>, 1, User)),
+      profile_image_url = element(2, lists:keyfind(<<"profile_image_url">>, 1, User)),
+      url = element(2, lists:keyfind(<<"url">>, 1, User)),
+      protected = element(2, lists:keyfind(<<"protected">>, 1, User)),
+      followers_count = element(2, lists:keyfind(<<"followers_count">>, 1, User)),
+      profile_background_color = element(2, lists:keyfind(<<"profile_background_color">>, 1, User)),
+      profile_text_color = element(2, lists:keyfind(<<"profile_text_color">>, 1, User)),
+      profile_link_color = element(2, lists:keyfind(<<"profile_link_color">>, 1, User)),
+      profile_sidebar_fill_color = element(2, lists:keyfind(<<"profile_sidebar_fill_color">>, 1, User)),
+      profile_sidebar_border_color = element(2, lists:keyfind(<<"profile_sidebar_border_color">>, 1, User)),
+      friends_count = element(2, lists:keyfind(<<"friends_count">>, 1, User)),
+      created_at = element(2, lists:keyfind(<<"created_at">>, 1, User)),
+      favourites_count = element(2, lists:keyfind(<<"favourites_count">>, 1, User)),
+      utc_offset = element(2, lists:keyfind(<<"utc_offset">>, 1, User)),
+      time_zone = element(2, lists:keyfind(<<"time_zone">>, 1, User)),
+      following = element(2, lists:keyfind(<<"following">>, 1, User)),
+      notifications = element(2, lists:keyfind(<<"notifications">>, 1, User)),
+      statuses_count = element(2, lists:keyfind(<<"statuses_count">>, 1, User))
+     },
+    UserRec.
+
+fill_status_rec(Tweet) ->
+    io:format("Data looks like this ~p~n", [Tweet]),
+    {struct, Data} = Tweet,
+    Status = #status{
+      created_at =	element(2, lists:keyfind(<<"created_at">>, 1, Data)),
+      id =		element(2, lists:keyfind(<<"id">>, 1, Data)),
+      text =		element(2, lists:keyfind(<<"text">>, 1, Data)),
+      source =		element(2, lists:keyfind(<<"source">>, 1, Data)),
+      truncated =	element(2, lists:keyfind(<<"truncated">>, 1, Data)),
+      in_reply_to_status_id =	element(2, lists:keyfind(<<"in_reply_to_status_id">>, 1, Data)),
+      in_reply_to_user_id =	element(2, lists:keyfind(<<"in_reply_to_user_id">>, 1, Data)),
+      favorited =	element(2, lists:keyfind(<<"favorited">>, 1, Data)),
+      user = 		fill_user_rec(element(2, lists:keyfind(<<"user">>, 1, Data)))
+     },
+    Status.
+
+
 receive_chunk(RequestId, Callback) ->
     receive
 	{http, {RequestId, {error, Reason}}} when(Reason =:= etimedout) orelse(Reason =:= timeout) ->
@@ -98,12 +149,17 @@ receive_chunk(RequestId, Callback) ->
 	    error_logger:info_msg("Streaming data start ~p ~n",[Headers]),
 	    receive_chunk(RequestId, Callback);
 
-	%% streaming chunk of data
-	%% this is where we will be looping around,
-	%% we spawn this off to a seperate process as soon as we get the chunk and go back to receiving the tweets
+	%% Streaming chunk of data. This is where we will be looping
+	%% around, we spawn this off to a seperate process as soon as
+	%% we get the chunk and go back to receiving the tweets
+
+	%% Ignore it if it's empty.
+	{http,{RequestId, stream, Data}} when Data == <<"\r\n">> ->
+	    receive_chunk(RequestId, Callback);
+
 	{http,{RequestId, stream, Data}} ->
 	    {M, F, A} = Callback,
-	    spawn(M, F, [A ++ [Data]]),
+	    spawn(M, F, [A ++ [fill_status_rec(mochijson2:decode(Data))]]),
 	    receive_chunk(RequestId, Callback);
 
 	%% end of streaming data
