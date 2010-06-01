@@ -4,7 +4,7 @@
 
 -behaviour(gen_server).
 
-%% Copyright (c) 2009, Jebu Ittiachen
+%% Copyright (c) 2009-2010, Jebu Ittiachen, David N. Welton
 %% All rights reserved.
 %%
 %% Redistribution and use in source and binary forms, with or without modification, are
@@ -202,7 +202,7 @@ fill_user_rec({struct, User}) ->
     UserRec.
 
 fill_status_rec(Tweet) ->
-    io:format("Data looks like this ~p~n", [Tweet]),
+    %% io:format("Data looks like this ~p~n", [Tweet]),
     {struct, Data} = Tweet,
     Status = #status{
       created_at =	element(2, lists:keyfind(<<"created_at">>, 1, Data)),
