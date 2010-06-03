@@ -34,17 +34,19 @@
 
 %% API
 -export([start_link/2]).
--export([fetch/3]).
+-export([fetch/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
 
+-define(SERVER, {local, ?MODULE}).
+
 -define(BACKOFF, 2).
 
 -include("twitter_client.hrl").
 
--record(state, {}).
+-record(state, {eventmgr, callback, sleep, url}).
 
 %%====================================================================
 %% API
@@ -54,7 +56,8 @@
 %% Description: Starts the server
 %%--------------------------------------------------------------------
 start_link(Url, Callback) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [Url, Callback], []).
+    gen_server:start_link(?SERVER, ?MODULE, [Url, Callback], []).
+
 
 %%====================================================================
 %% gen_server callbacks
@@ -68,8 +71,9 @@ start_link(Url, Callback) ->
 %% Description: Initiates the server
 %%--------------------------------------------------------------------
 init([Url, Callback]) ->
-    spawn_link(?MODULE, fetch, [Url, Callback, 1]),
-    {ok, #state{}}.
+    {ok, EventMgr} = gen_event:start_link(),
+    gen_server:cast(?MODULE, {fetch, Url, 1}),
+    {ok, #state{eventmgr = EventMgr, callback = Callback, sleep = 1, url = Url}}.
 
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(Request, From, State) -> {reply, Reply, State} |
@@ -80,9 +84,9 @@ init([Url, Callback]) ->
 %%                                      {stop, Reason, State}
 %% Description: Handling call messages
 %%--------------------------------------------------------------------
+
 handle_call(_Request, _From, State) ->
-    Reply = ok,
-    {reply, Reply, State}.
+    {reply, ok, State}.
 
 %%--------------------------------------------------------------------
 %% Function: handle_cast(Msg, State) -> {noreply, State} |
@@ -91,7 +95,12 @@ handle_call(_Request, _From, State) ->
 %% Description: Handling cast messages
 %%--------------------------------------------------------------------
 
-handle_cast(_Msg, State) ->
+handle_cast({fetch, Url, Sleep}, State) ->
+    fetch(Url, Sleep),
+    {noreply, State#state{sleep = Sleep}};
+
+handle_cast(Msg, State) ->
+    error_logger:info_msg("~p handle_cast ~p ~n", [?MODULE, Msg]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -100,7 +109,47 @@ handle_cast(_Msg, State) ->
 %%                                       {stop, Reason, State}
 %% Description: Handling all non call/cast messages
 %%--------------------------------------------------------------------
-handle_info(_Info, State) ->
+
+%% Handle all the http streaming stuff.
+
+handle_info({http, Rest}, State) ->
+    Sleep = State#state.sleep,
+    Url = State#state.url,
+    case Rest of
+	{_RequestId, {error, Reason}} when(Reason =:= etimedout) orelse(Reason =:= timeout) ->
+	    error_logger:error_msg("Stream timed out: ~p~n", [Reason]),
+	    gen_server:cast(?MODULE, {fetch, Url, Sleep * ?BACKOFF});
+	{_RequestId, {{_, 401, _} = _Status, _Headers, _}} ->
+	    error_logger:error_msg("Unauthorized request: ~p~n");
+            %% Authorization problem: we need to really fail here, no restarts.
+	{_RequestId, Result} ->
+	    error_logger:error_msg("Stream failure: ~p~n", [Result]),
+	    gen_server:cast(?MODULE, {fetch, Url, Sleep * ?BACKOFF});
+	%% start of streaming data
+	{_RequestId, stream_start, Headers} ->
+	    error_logger:info_msg("Streaming data start ~p ~n",[Headers]);
+
+	%% Streaming chunk of data. This is where we will be looping
+	%% around, we spawn this off to a seperate process as soon as
+	%% we get the chunk and go back to receiving the tweets
+
+	%% Ignore it if it's empty.
+	{_RequestId, stream, Data} when Data == <<"\r\n">> ->
+	    ok;
+	{_RequestId, stream, Data} ->
+	    %% Call the gen_event stuff...
+	    {M, F, A} = State#state.callback,
+	    spawn(M, F, [A ++ [fill_status_rec(mochijson2:decode(Data))]]);
+	%% end of streaming data - we just restart in this case,
+	%% because we want a never-ending stream.
+	{_RequestId, stream_end, Headers} ->
+	    error_logger:info_msg("Streaming data end ~p ~n", [Headers]),
+	    gen_server:cast(?MODULE, {fetch, Url, Sleep * ?BACKOFF})
+    end,
+    {noreply, State};
+
+handle_info(Info, State) ->
+    error_logger:info_msg("~p handle_info ~p ~n", [?MODULE, Info]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -128,43 +177,22 @@ code_change(_OldVsn, State, _Extra) ->
 %% 3 arg version expects url of the form http://user:password@stream.twitter.com/1/statuses/sample.json
 %% retry - number of times the stream is reconnected
 %% sleep - secs to sleep between retries.
-fetch(URL, Callback, Sleep) ->
-    error_logger:info_msg("Fetching: ~p~n", [URL]),
+fetch(Url, Sleep) ->
+    timer:sleep(Sleep * 1000),
+    error_logger:info_msg("Fetching: ~p~n", [Url]),
     %% setup the request to process async and have it stream the data
     %% back to this process
-    try http:request(get,
-		     {URL, []},
-		     [],
-		     [{sync, false},
-		      {stream, self}]) of
-	{ok, RequestId} ->
-	    case receive_chunk(RequestId, Callback) of
-		{ok, _} ->
-		    %% stream broke normally retry
-		    error_logger:info_msg("Stream broke normally, retry ~n"),
-		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Callback, Sleep * ?BACKOFF);
-		{error, unauthorized, Result} ->
-		    error_logger:info_msg("Request not authorized: ~p~n", [Result]),
-		    {error, Result, unauthorized};
-		{error, timeout} ->
-		    error_logger:info_msg("Request timed out~n"),
-		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Callback, Sleep * ?BACKOFF);
-		{_, Reason} ->
-		    error_logger:info_msg("Request problem: ~p ~n", [Reason]),
-		    timer:sleep(Sleep * 1000),
-		    fetch(URL, Callback, Sleep * ?BACKOFF)
-	    end;
+    Res = http:request(get,
+		 {Url, []},
+		 [],
+		 [{sync, false},
+		  {stream, self}]),
+    case Res of
+	{ok, _RequestId} ->
+	    ok;
 	Notok ->
 	    error_logger:info_msg("Request not ok: ~p~n", [Notok]),
-	    timer:sleep(Sleep * 1000),
-	    fetch(URL, Callback, Sleep * ?BACKOFF)
-    catch
-	Type:Reason ->
-	    error_logger:debug_msg("Caught: ~p ~p~n", [Type, Reason]),
-	    timer:sleep(Sleep * 1000),
-	    fetch(URL, Callback, Sleep * ?BACKOFF)
+	    gen_server:cast(?MODULE, {fetch, Url, Sleep * ?BACKOFF})
     end.
 
 %%====================================================================
@@ -216,42 +244,3 @@ fill_status_rec(Tweet) ->
       user = 		fill_user_rec(element(2, lists:keyfind(<<"user">>, 1, Data)))
      },
     Status.
-
-
-receive_chunk(RequestId, Callback) ->
-    receive
-	{http, {RequestId, {error, Reason}}} when(Reason =:= etimedout) orelse(Reason =:= timeout) ->
-	    {error, timeout};
-	{http, {RequestId, {{_, 401, _} = Status, Headers, _}}} ->
-	    {error, unauthorized, {Status, Headers}};
-	{http, {RequestId, Result}} ->
-	    {error, Result};
-
-	%% start of streaming data
-	{http,{RequestId, stream_start, Headers}} ->
-	    error_logger:info_msg("Streaming data start ~p ~n",[Headers]),
-	    receive_chunk(RequestId, Callback);
-
-	%% Streaming chunk of data. This is where we will be looping
-	%% around, we spawn this off to a seperate process as soon as
-	%% we get the chunk and go back to receiving the tweets
-
-	%% Ignore it if it's empty.
-	{http,{RequestId, stream, Data}} when Data == <<"\r\n">> ->
-	    receive_chunk(RequestId, Callback);
-
-	{http,{RequestId, stream, Data}} ->
-	    {M, F, A} = Callback,
-	    spawn(M, F, [A ++ [fill_status_rec(mochijson2:decode(Data))]]),
-	    receive_chunk(RequestId, Callback);
-
-	%% end of streaming data
-	{http,{RequestId, stream_end, Headers}} ->
-	    error_logger:info_msg("Streaming data end ~p ~n", [Headers]),
-	    {ok, RequestId}
-
-	    %% timeout
-    after 60 * 1000 ->
-	    {error, timeout}
-
-    end.
