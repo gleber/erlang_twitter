@@ -1,6 +1,7 @@
 -module(twitter_stream).
 
 -author('jebu@jebu.net').
+-author('davidw@dedasys.com').
 
 -behaviour(gen_server).
 
@@ -34,6 +35,7 @@
 
 %% API
 -export([start_link/1]).
+-export([start_link/2]).
 -export([fetch/2, add_handler/1, add_handler/2]).
 
 %% gen_server callbacks
@@ -57,6 +59,8 @@
 %%--------------------------------------------------------------------
 start_link(Url) ->
     gen_server:start_link(?SERVER, ?MODULE, [Url], []).
+start_link(Url, Opts) ->
+    gen_server:start_link(?SERVER, ?MODULE, [Url], Opts).
 
 %% Add a handler to receive callbacks.
 
