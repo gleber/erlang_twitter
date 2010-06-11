@@ -47,11 +47,19 @@ string_to_int(S) ->
       {error,no_integer} -> null
     end.
 
+
 compose_body(Args) ->
     lists:concat(
         lists:foldl(
             fun (Rec, []) -> [Rec]; (Rec, Ac) -> [Rec, "&" | Ac] end,
             [],
-            [K ++ "=" ++ twitter_client_utils:url_encode(V) || {K, V} <- Args]
+            [atol(K) ++ "=" ++ twitter_client_utils:url_encode(V) || {K, V} <- Args]
         )
     ).
+
+%% This lets us use atoms as keys for compose_body.
+
+atol(Str) when is_atom(Str) ->
+    atom_to_list(Str);
+atol(Str) ->
+    Str.
