@@ -34,13 +34,15 @@
 
 
 %% API
--export([start_link/1]).
 -export([start_link/2]).
--export([fetch/2, add_handler/1, add_handler/2]).
+-export([start_link/3]).
+-export([fetch/3, add_handler/1, add_handler/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
 	 terminate/2, code_change/3]).
+
+-define(URL, "@stream.twitter.com/1/statuses/filter.json").
 
 -define(SERVER, {local, ?MODULE}).
 
@@ -48,19 +50,14 @@
 
 -include("twitter_client.hrl").
 
--record(state, {eventmgr, callback, sleep, url}).
+-record(state, {eventmgr, callback, sleep, tauth, tparams}).
 
-%%====================================================================
-%% API
-%%====================================================================
-%%--------------------------------------------------------------------
-%% Function: start_link() -> {ok,Pid} | ignore | {error,Error}
-%% Description: Starts the server
-%%--------------------------------------------------------------------
-start_link(Url) ->
-    gen_server:start_link(?SERVER, ?MODULE, [Url], []).
-start_link(Url, Opts) ->
-    gen_server:start_link(?SERVER, ?MODULE, [Url], Opts).
+%% TwitterAuth looks like {User, Pass}, TwitterParams like [{follow, "1216876,2323,3431212,22392"}]
+
+start_link(TwitterAuth, TwitterParams) ->
+    gen_server:start_link(?SERVER, ?MODULE, [TwitterAuth, TwitterParams], []).
+start_link(TwitterAuth, TwitterParams, Opts) ->
+    gen_server:start_link(?SERVER, ?MODULE, [TwitterAuth, TwitterParams], Opts).
 
 %% Add a handler to receive callbacks.
 
@@ -84,13 +81,13 @@ add_handler(EventManager, Handler) ->
 %%                         {stop, Reason}
 %% Description: Initiates the server
 %%--------------------------------------------------------------------
-init([Url]) ->
+init([TwitterAuth, TwitterParams]) ->
     {ok, EventMgr} = gen_event:start_link(),
-    gen_server:cast(?MODULE, {fetch, Url, 1}),
-    {ok, #state{eventmgr = [EventMgr], sleep = 1, url = Url}}.
+    gen_server:cast(?MODULE, {fetch, TwitterAuth, TwitterParams, 1}),
+    {ok, #state{eventmgr = [EventMgr], sleep = 1, tauth = TwitterAuth, tparams = TwitterParams}}.
 
 %%--------------------------------------------------------------------
-%% Function: %% handle_call(Request, From, State) -> {reply, Reply, State} |
+%% Function: %% handle_call(TwitterRequest, From, State) -> {reply, Reply, State} |
 %%                                      {reply, Reply, State, Timeout} |
 %%                                      {noreply, State} |
 %%                                      {noreply, State, Timeout} |
@@ -117,8 +114,8 @@ handle_call(_Request, _From, State) ->
 %% Description: Handling cast messages
 %%--------------------------------------------------------------------
 
-handle_cast({fetch, Url, Sleep}, State) ->
-    fetch(Url, Sleep),
+handle_cast({fetch, TwitterAuth, TwitterParams, Sleep}, State) ->
+    fetch(TwitterAuth, TwitterParams, Sleep),
     {noreply, State#state{sleep = Sleep}};
 
 handle_cast(Msg, State) ->
@@ -136,20 +133,21 @@ handle_cast(Msg, State) ->
 
 handle_info({http, Rest}, State) ->
     Sleep = State#state.sleep,
-    Url = State#state.url,
+    TwitterAuth = State#state.tauth,
+    TwitterParams = State#state.tparams,
     case Rest of
 	{_RequestId, {error, Reason}} when(Reason =:= etimedout) orelse(Reason =:= timeout) ->
 	    error_logger:error_msg("Stream timed out: ~p~n", [Reason]),
-	    gen_server:cast(?MODULE, {fetch, Url, Sleep * ?BACKOFF});
+	    gen_server:cast(?MODULE, {fetch, TwitterAuth, TwitterParams, Sleep * ?BACKOFF});
 	{_RequestId, {{_, 401, _} = _Status, _Headers, _}} ->
 	    error_logger:error_msg("Unauthorized request: ~p~n");
             %% Authorization problem: we need to really fail here, no restarts.
 	{_RequestId, Result} ->
 	    error_logger:error_msg("Stream failure: ~p~n", [Result]),
-	    gen_server:cast(?MODULE, {fetch, Url, Sleep * ?BACKOFF});
+	    gen_server:cast(?MODULE, {fetch, TwitterAuth, TwitterParams, Sleep * ?BACKOFF});
 	%% start of streaming data
 	{_RequestId, stream_start, Headers} ->
-	    error_logger:info_msg("Streaming data start ~p ~n",[Headers]);
+	    error_logger:info_msg("Streaming data start ~p ~n", [Headers]);
 
 	%% Streaming chunk of data. This is where we will be looping
 	%% around, we spawn this off to a seperate process as soon as
@@ -169,7 +167,7 @@ handle_info({http, Rest}, State) ->
 	%% because we want a never-ending stream.
 	{_RequestId, stream_end, Headers} ->
 	    error_logger:info_msg("Streaming data end ~p ~n", [Headers]),
-	    gen_server:cast(?MODULE, {fetch, Url, Sleep * ?BACKOFF})
+	    gen_server:cast(?MODULE, {fetch, TwitterAuth, TwitterParams, Sleep * ?BACKOFF})
     end,
     {noreply, State};
 
@@ -197,22 +195,30 @@ code_change(_OldVsn, State, _Extra) ->
 %% 3 arg version expects url of the form http://user:password@stream.twitter.com/1/statuses/sample.json
 %% retry - number of times the stream is reconnected
 %% sleep - secs to sleep between retries.
-fetch(Url, Sleep) ->
+fetch(TwitterAuth, TwitterParams, Sleep) ->
     timer:sleep(Sleep * 1000),
-    error_logger:info_msg("Fetching: ~p~n", [Url]),
+    error_logger:info_msg("Fetching: ~p~n", [TwitterParams]),
     %% setup the request to process async and have it stream the data
     %% back to this process
-    Res = http:request(get,
-		 {Url, []},
-		 [],
-		 [{sync, false},
-		  {stream, self}]),
+
+    Url = "http://" ++
+	string:join(tuple_to_list(TwitterAuth), ":") ++
+	?URL,
+    Res = http:request(post,
+		       {Url,
+			[],
+			"application/x-www-form-urlencoded",
+			twitter_client_utils:compose_body(TwitterParams)
+		       },
+		       [],
+		       [{sync, false},
+			{stream, self}]),
     case Res of
 	{ok, _RequestId} ->
 	    ok;
 	Notok ->
-	    error_logger:info_msg("Request not ok: ~p~n", [Notok]),
-	    gen_server:cast(?MODULE, {fetch, Url, Sleep * ?BACKOFF})
+	    error_logger:info_msg("Twitter request not ok: ~p~n", [Notok]),
+	    gen_server:cast(?MODULE, {fetch, TwitterAuth, TwitterParams, Sleep * ?BACKOFF})
     end.
 
 %%====================================================================
