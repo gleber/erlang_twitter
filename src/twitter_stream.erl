@@ -34,8 +34,10 @@
 
 
 %% API
--export([start_link/2]).
--export([start_link/3]).
+-export([start/0, stop/0]).
+
+-export([start_link/0]).
+-export([start_stream/2]).
 -export([fetch/3, add_handler/1, add_handler/2]).
 
 %% gen_server callbacks
@@ -52,12 +54,19 @@
 
 -record(state, {eventmgr, callback, sleep, tauth, tparams}).
 
+start() ->
+    application:start(twitter_stream).
+
+stop() ->
+    application:stop(twitter_stream).
+
 %% TwitterAuth looks like {User, Pass}, TwitterParams like [{follow, "1216876,2323,3431212,22392"}]
 
-start_link(TwitterAuth, TwitterParams) ->
-    gen_server:start_link(?SERVER, ?MODULE, [TwitterAuth, TwitterParams], []).
-start_link(TwitterAuth, TwitterParams, Opts) ->
-    gen_server:start_link(?SERVER, ?MODULE, [TwitterAuth, TwitterParams], Opts).
+start_link() ->
+    gen_server:start_link(?SERVER, ?MODULE, [], []).
+
+start_stream(TwitterAuth, TwitterParams) ->
+    gen_server:call(?MODULE, {start_stream, TwitterAuth, TwitterParams}).
 
 %% Add a handler to receive callbacks.
 
@@ -81,10 +90,10 @@ add_handler(EventManager, Handler) ->
 %%                         {stop, Reason}
 %% Description: Initiates the server
 %%--------------------------------------------------------------------
-init([TwitterAuth, TwitterParams]) ->
+
+init([]) ->
     {ok, EventMgr} = gen_event:start_link(),
-    gen_server:cast(?MODULE, {fetch, TwitterAuth, TwitterParams, 1}),
-    {ok, #state{eventmgr = [EventMgr], sleep = 1, tauth = TwitterAuth, tparams = TwitterParams}}.
+    {ok, #state{eventmgr = [EventMgr], sleep = 1}}.
 
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(TwitterRequest, From, State) -> {reply, Reply, State} |
@@ -103,6 +112,10 @@ handle_call({add_handler, EventManager, _Handler}, _From, State) ->
 handle_call({add_handler, Handler}, _From, State) ->
     ok = gen_event:add_handler(State#state.eventmgr, Handler, []),
     {reply, ok, State};
+
+handle_call({start_stream, TwitterAuth, TwitterParams}, _From, State) ->
+    gen_server:cast(?MODULE, {fetch, TwitterAuth, TwitterParams, 1}),
+    {reply, {ok, self()}, State#state{tauth = TwitterAuth, tparams = TwitterParams}};
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
