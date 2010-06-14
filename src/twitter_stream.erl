@@ -52,7 +52,7 @@
 
 -include("twitter_client.hrl").
 
--record(state, {eventmgr, callback, sleep, tauth, tparams}).
+-record(state, {eventmgr, eventmgrlst, callback, sleep, tauth, tparams}).
 
 start() ->
     application:start(twitter_stream).
@@ -93,7 +93,7 @@ add_handler(EventManager, Handler) ->
 
 init([]) ->
     {ok, EventMgr} = gen_event:start_link(),
-    {ok, #state{eventmgr = [EventMgr], sleep = 1}}.
+    {ok, #state{eventmgr = EventMgr, eventmgrlst = [], sleep = 1}}.
 
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(TwitterRequest, From, State) -> {reply, Reply, State} |
@@ -106,8 +106,8 @@ init([]) ->
 %%--------------------------------------------------------------------
 
 handle_call({add_handler, EventManager, _Handler}, _From, State) ->
-    EventManList = State#state.eventmgr ++ [EventManager],
-    {reply, ok, State#state{eventmgr = EventManList}};
+    EventManList = State#state.eventmgrlst ++ [EventManager],
+    {reply, ok, State#state{eventmgrlst = EventManList}};
 
 handle_call({add_handler, Handler}, _From, State) ->
     ok = gen_event:add_handler(State#state.eventmgr, Handler, []),
@@ -288,7 +288,8 @@ fill_status_rec(Tweet) ->
 %% all of them.
 
 notify_all_managers(State, Message) ->
+    gen_event:notify(State#state.eventmgr, Message),
     lists:foreach(fun(Manager) ->
 			  gen_event:notify(Manager, Message)
 		  end,
-		  State#state.eventmgr).
+		  State#state.eventmgrlst).
