@@ -172,8 +172,15 @@ handle_info({http, Rest}, State) ->
 
 	%% This is where we actually do something!
 	{_RequestId, stream, Data} ->
-	    Tweet = fill_status_rec(mochijson2:decode(Data)),
-	    notify_all_managers(State, {tweet, Tweet});
+	    {struct, Json} = mochijson2:decode(Data),
+	    True = lists:keymember(<<"text">>, 1, Json),
+	    if
+		True == true ->
+		    Tweet = fill_status_rec(Json),
+		    notify_all_managers(State, {tweet, Tweet});
+		true ->
+		    {noreply, State}
+	    end;
 %	    {M, F, A} = State#state.callback,
 %	    spawn(M, F, [A ++ [Tweet]]);
 	%% end of streaming data - we just restart in this case,
@@ -268,9 +275,8 @@ fill_user_rec({struct, User}) ->
      },
     UserRec.
 
-fill_status_rec(Tweet) ->
+fill_status_rec(Data) ->
     %% io:format("Data looks like this ~p~n", [Tweet]),
-    {struct, Data} = Tweet,
     Status = #status{
       created_at =	element(2, lists:keyfind(<<"created_at">>, 1, Data)),
       id =		element(2, lists:keyfind(<<"id">>, 1, Data)),
