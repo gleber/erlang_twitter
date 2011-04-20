@@ -179,7 +179,7 @@ handle_info({http, Rest}, State) ->
 		    Tweet = fill_status_rec(Json),
 		    notify_all_managers(State, {tweet, Tweet});
 		true ->
-		    {noreply, State}
+		    ok
 	    end;
 %	    {M, F, A} = State#state.callback,
 %	    spawn(M, F, [A ++ [Tweet]]);
@@ -212,7 +212,7 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-%% 3 arg version expects url of the form http://user:password@stream.twitter.com/1/statuses/sample.json
+%% 3 arg version expects url of the form httpc://user:password@stream.twitter.com/1/statuses/sample.json
 %% retry - number of times the stream is reconnected
 %% sleep - secs to sleep between retries.
 fetch(TwitterAuth, TwitterParams, Sleep) ->
@@ -224,7 +224,7 @@ fetch(TwitterAuth, TwitterParams, Sleep) ->
     Url = "http://" ++
 	string:join(tuple_to_list(TwitterAuth), ":") ++
 	?URL,
-    Res = http:request(post,
+    Res = httpc:request(post,
 		       {Url,
 			[],
 			"application/x-www-form-urlencoded",
